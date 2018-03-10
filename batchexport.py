@@ -12,6 +12,15 @@ def startProcess(blenderPath):
       blender + ' -b RenderSetup.blend --python batchexport.py -- --mode render 1> nul'
     ], shell=True)
 
+def printProgress(curr, maxItems, append='', end=False):
+        width = 40
+        step = width / maxItems
+        bar = '[{}{}]'.format('#' * math.floor(step * curr), ' ' * math.ceil(step * (maxItems - curr)))
+        prog = ' {}%'.format(int((100 / maxItems) * curr))
+
+        endCap = '\r' if not end else '\n'
+        print(bar + prog + ' - ' + append, file=sys.stderr, end=endCap)
+
 def batchRender(renderObjectsDir, outputDir):
     import bpy
 
@@ -25,15 +34,6 @@ def batchRender(renderObjectsDir, outputDir):
     bpy.context.scene.render.resolution_y = 128
 
     scn = bpy.context.scene
-
-    def printProgress(curr, maxItems, append='', end=False):
-        width = 40
-        step = width / maxItems
-        bar = '[{}{}]'.format('#' * math.floor(step * curr), ' ' * math.ceil(step * (maxItems - curr)))
-        prog = ' {}%'.format(int((100 / maxItems) * curr))
-
-        endCap = '\r' if not end else '\n'
-        print(bar + prog + ' - ' + append, file=sys.stderr, end=endCap)
 
     for (root, dirs, files) in os.walk(os.path.join(cwd, renderObjectsDir)):
         files = [f for f in files if f.endswith('.blend')]
@@ -63,21 +63,35 @@ def batchRender(renderObjectsDir, outputDir):
 
             cameraNode = bpy.data.objects['CameraNode']
             camera = bpy.data.objects['Camera']
-            newEnd = scn.frame_end * longestAnim
+            framesRotation = scn.frame_end + 1
+            framesAnimation = longestAnim + 1
+            newEnd = framesRotation * framesAnimation
+
+            scn.frame_set(0)
+
+            # Save camera position, we will need it soon
+            orig_pos = copy.deepcopy(camera.matrix_world)
+            orig_pos_node = copy.deepcopy(cameraNode.matrix_world)
 
             # render frames
-            for i in range(scn.frame_end + 1):
+            for i in range(framesRotation):
+                camera.matrix_world = orig_pos
+                cameraNode.matrix_world = orig_pos_node
+
                 scn.frame_set(i)
+
+                orig_pos = copy.deepcopy(camera.matrix_world)
+                orig_pos_node = copy.deepcopy(cameraNode.matrix_world)
+
                 newName = os.path.join(fileOutputPath, objectName)
 
                 if longestAnim != 0:
-                    matrix_world = copy.deepcopy(camera.matrix_world)
-
-                    for j in range(longestAnim + 1):
+                    for j in range(framesAnimation):
                         scn.frame_set(j)
 
                         # HACK: Reset the camera position for each animation frame
-                        camera.matrix_world = matrix_world
+                        camera.matrix_world = orig_pos
+                        cameraNode.matrix_world = orig_pos_node
 
                         # basename is appended with first the per object animation frames and then rotation
                         newName = os.path.join(fileOutputPath, objectName)
@@ -87,11 +101,20 @@ def batchRender(renderObjectsDir, outputDir):
                         bpy.context.scene.render.filepath = newName
                         bpy.ops.render.render(write_still=True)
 
-                        printProgress(i * longestAnim + j, newEnd + longestAnim, append='({}/{}) Frames'.format(i * longestAnim + j, newEnd + longestAnim))
+                        printProgress(i * framesAnimation + j, newEnd, append='({}/{}) Frames'.format(i * framesAnimation + j + 1, newEnd))
+
+                    # HACK CONTINUED:
+                    # Keyframes always execute the next queued action
+                    # so we have to execute it the remaining amount of times to reset the rotation to its initial state
+                    # TODO: Better handling in case of rotation having less frames than the animation
+                    for j in range(framesRotation - framesAnimation):
+                        scn.frame_set(j)
+                        camera.matrix_world = orig_pos
+                        cameraNode.matrix_world = orig_pos_node
                 else:
                     # basename is only appended with rotation frames
                     newName = os.path.join(fileOutputPath, objectName)
-                    newName += + '_{}'.format(str(i).zfill(4))
+                    newName += '_{}'.format(str(i).zfill(4))
 
                     bpy.context.scene.render.filepath = newName
                     bpy.ops.render.render(write_still=True)
@@ -111,9 +134,30 @@ def batchRender(renderObjectsDir, outputDir):
                   bpy.data.objects[obj.name].select = True
             bpy.ops.object.delete()
 
+def compressImages(outputDir):
+    from PIL import Image
+
+    print('Compressing Files')
+
+    cwd = os.getcwd()
+    dirPaths = os.path.join(cwd, outputDir)
+    for (root, dirs, files) in os.walk(dirPaths):
+        for (index, directory) in enumerate(dirs):
+            print('Compressing now: {} ({}/{})'.format(directory, index + 1, len(dirs)))
+            filePath = os.path.join(dirPaths, directory)
+            for (root, dirs, files) in os.walk(filePath):
+                for curr in files:
+                    currPath = os.path.join(filePath, curr)
+                    curr = Image.open(currPath)
+                    curr.save(currPath, optimize=True, quality=5)
+                    curr.close()
+
 parser = argparse.ArgumentParser()
 
 parser.add_argument('--mode', '-m', default='start', help=argparse.SUPPRESS)
+
+parser.add_argument('--compress', '-c', action='store_true')
+parser.set_defaults(compress=False)
 
 parser.add_argument('--renderObjectsDir', '-rd', default='RenderObjects')
 parser.add_argument('--outputDir', '-o', default='Output')
@@ -128,5 +172,7 @@ args = parser.parse_args(newArgv)
 
 if args.mode == 'start':
     startProcess(args.blenderPath)
+    if args.compress:
+        compressImages(args.outputDir)
 elif args.mode == 'render':
     batchRender(args.renderObjectsDir, args.outputDir)
